@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<site>
+   <bundle id="org.idempiere.myappx.plugin.odt" version="14.0.0.qualifier">
+      <category name="myappx.odt.extensions"/>
+   </bundle>
+   <category-def name="myappx.odt.extensions" label="MyAppx ODT Extensions"/>
+</site>
