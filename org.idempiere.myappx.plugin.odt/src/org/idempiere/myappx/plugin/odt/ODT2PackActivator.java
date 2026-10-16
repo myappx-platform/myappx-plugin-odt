@@ -84,6 +84,8 @@ public class ODT2PackActivator extends Incremental2PackActivator {
 	protected final static CLogger logger = CLogger.getCLogger(ODT2PackActivator.class.getName());
 	private File currentFile;
 	private HashMap<String, URL> file2urlMap = new HashMap<String, URL>();
+	/** Depth of the pack-in row lock. A nested acquire must not open a second transaction on the same row. */
+	private int dbLockDepth;
 	
 	@Override
 	public String getName() {
@@ -102,17 +104,57 @@ public class ODT2PackActivator extends Incremental2PackActivator {
 
 	private void installPackage() {
 		ODTLog.info(logger, ODTLog.MOD_2PACK, "ODT2Pack starting | " + ODTLog.kvs("bundle", getName()));
-		
-		ODTLog.info(logger, ODTLog.MOD_2PACK, "Phase 1/3: pre-install | " + ODTLog.kvs("bundle", getName()));
-		preInstallPackage();
-		
-		ODTLog.info(logger, ODTLog.MOD_2PACK, "Phase 2/3: pack-in | " + ODTLog.kvs("bundle", getName()));
-		packInAll(); 		 // ODTPackage*.xml + 2Pack_*.zip + ODT2Pack-*.zip
-		
-		ODTLog.info(logger, ODTLog.MOD_2PACK, "Phase 3/3: post-install | " + ODTLog.kvs("bundle", getName()));
-		postInstallPackage();
-		
-		ODTLog.info(logger, ODTLog.MOD_2PACK, "ODT2Pack done | " + ODTLog.kvs("bundle", getName()));
+		boolean locked = false;
+		try {
+			if (!getDBLock()) {
+				addLog(Level.WARNING, "Could not acquire the DB lock to install " + getName());
+				return;
+			}
+			locked = true;
+
+			ODTLog.info(logger, ODTLog.MOD_2PACK, "Phase 1/3: pre-install | " + ODTLog.kvs("bundle", getName()));
+			preInstallPackage();
+
+			ODTLog.info(logger, ODTLog.MOD_2PACK, "Phase 2/3: pack-in | " + ODTLog.kvs("bundle", getName()));
+			packInAll(); 		 // ODTPackage*.xml + 2Pack_*.zip + ODT2Pack-*.zip
+
+			ODTLog.info(logger, ODTLog.MOD_2PACK, "Phase 3/3: post-install | " + ODTLog.kvs("bundle", getName()));
+			postInstallPackage();
+
+			ODTLog.info(logger, ODTLog.MOD_2PACK, "ODT2Pack done | " + ODTLog.kvs("bundle", getName()));
+		} catch (AdempiereSystemError e) {
+			addLog(Level.SEVERE, e.getLocalizedMessage());
+		} finally {
+			if (locked)
+				releaseLock();
+		}
+	}
+
+	/**
+	 * The pack-in lock is a row lock on a dedicated transaction.
+	 * {@code installPackage} holds it for the whole install; nested 2Pack and folder pack-in reuse that hold.
+	 */
+	@Override
+	public boolean getDBLock() throws AdempiereSystemError {
+		if (dbLockDepth > 0) {
+			dbLockDepth++;
+			return true;
+		}
+		if (!super.getDBLock())
+			return false;
+		dbLockDepth = 1;
+		return true;
+	}
+
+	@Override
+	public void releaseLock() {
+		if (dbLockDepth > 1) {
+			dbLockDepth--;
+			return;
+		}
+		if (dbLockDepth == 1)
+			dbLockDepth = 0;
+		super.releaseLock();
 	}
 	
 	private void packInAll() {
