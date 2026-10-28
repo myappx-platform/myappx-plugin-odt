@@ -162,8 +162,9 @@ public final class ODTDdlService
 		Trx trx = trxName != null ? Trx.get(trxName, true) : Trx.get(Trx.createTrxName("ODTDDL"), true);
 		if (MSysConfig.getBooleanValue(MSysConfig.TWOPACK_COMMIT_DDL, false))
 		{
+			// false often means nothing to commit; DDL still proceeds
 			if (!trx.commit())
-				ODTLog.warning(log, ODTLog.MOD_DDL, "Commit before DDL failed");
+				ODTLog.fine(log, ODTLog.MOD_DDL, "Commit before DDL returned false (nothing pending)");
 		}
 		return trx;
 	}
