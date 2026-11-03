@@ -8,8 +8,11 @@ package org.idempiere.myappx.plugin.odt.service;
 import java.sql.PreparedStatement;
 import java.sql.Statement;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
 import java.util.logging.Level;
@@ -18,6 +21,7 @@ import org.adempiere.exceptions.AdempiereException;
 import org.compiere.model.MColumn;
 import org.compiere.model.MTable;
 import org.compiere.model.PO;
+import org.compiere.model.Query;
 import org.compiere.model.X_AD_Column;
 import org.compiere.model.X_AD_TreeNodeMM;
 import org.compiere.util.CLogger;
@@ -32,6 +36,7 @@ import org.idempiere.myappx.plugin.odt.model.I_KS_ODTPackage;
 import org.idempiere.myappx.plugin.odt.model.MKSODTObjectData;
 import org.idempiere.myappx.plugin.odt.model.MKSODTObjectDataLine;
 import org.idempiere.myappx.plugin.odt.model.MKSODTVersion;
+import org.idempiere.myappx.plugin.odt.model.ODTInstallCache;
 import org.idempiere.myappx.plugin.odt.model.ODTDdlService;
 import org.idempiere.myappx.plugin.odt.model.ODTIndexService;
 import org.idempiere.myappx.plugin.odt.model.ODTPOBuilder;
@@ -71,6 +76,10 @@ public final class ODTInstallEngine
 						"versionId", version.get_ID(), "objectDataCount", objectDatas.size()));
 
 		LinkedHashSet<Integer> pendingColumnIds = new LinkedHashSet<>();
+		ODTInstallCache.begin();
+		try
+		{
+		Map<Integer, List<MKSODTObjectDataLine>> linesByObject = loadLines(version);
 
 		for (MKSODTObjectData odtod : objectDatas)
 		{
@@ -82,7 +91,7 @@ public final class ODTInstallEngine
 							"tableId", odtod.getAD_Table_ID()));
 
 			MTable table = MTable.get(ctx, odtod.getAD_Table_ID());
-			PO po = ODTPOHelper.generatePO(odtod.getObjectData_UUID(), table, trxName);
+			PO po = startObject(odtod.getObjectData_UUID(), table, trxName);
 
 			if (po.get_ID() != 0)
 				odtod.setObjectData_Action(X_KS_ODTObjectData.OBJECTDATA_ACTION_Update);
@@ -90,7 +99,7 @@ public final class ODTInstallEngine
 				odtod.setObjectData_Action(X_KS_ODTObjectData.OBJECTDATA_ACTION_Insert);
 			odtod.saveEx();
 
-			for (MKSODTObjectDataLine odtodl : odtod.getODTObjectDataLines())
+			for (MKSODTObjectDataLine odtodl : linesByObject.getOrDefault(odtod.get_ID(), Collections.emptyList()))
 			{
 				po = applyObjectDataLine(po, table, ctx, trxName, log,
 						odtodl.getAD_Column_ID(), odtodl.getNewID(), odtodl.getNewValue(),
@@ -116,15 +125,42 @@ public final class ODTInstallEngine
 			AttachmentODTUtil.installProcessAttachment(ctx, odtod, trxName, log);
 		}
 
+		boolean runAccessMaintenance = ODTInstallCache.needsAccessMaintenance();
 		ODTPostInstallService.postInstallPackage(ctx,
 				odtPackage.getEntityType(),
 				pendingColumnIds,
 				ODTIndexService.collectTableIndexUuidsFromVersion(ctx, version.get_ID(), trxName),
-				log, trxName);
+				log, trxName, runAccessMaintenance);
 
 		ODTLog.info(log, ODTLog.MOD_INSTALL, "Finished install from version | "
 				+ ODTLog.kvs("package", odtPackage.getName(), "versionId", version.get_ID(),
 						"pendingColumns", pendingColumnIds.size()));
+		}
+		finally
+		{
+			ODTInstallCache.end();
+		}
+	}
+
+	private static Map<Integer, List<MKSODTObjectDataLine>> loadLines(MKSODTVersion version)
+	{
+		List<MKSODTObjectDataLine> lines = new Query(version.getCtx(), X_KS_ODTObjectDataLine.Table_Name,
+				"KS_ODTObjectData_ID IN (SELECT KS_ODTObjectData_ID FROM KS_ODTObjectData WHERE KS_ODTVersion_ID=?)",
+				version.get_TrxName())
+				.setParameters(version.get_ID())
+				.list();
+		Map<Integer, List<MKSODTObjectDataLine>> byObject = new HashMap<>();
+		for (MKSODTObjectDataLine line : lines)
+			byObject.computeIfAbsent(line.getKS_ODTObjectData_ID(), id -> new ArrayList<>()).add(line);
+		return byObject;
+	}
+
+	private static PO startObject(String uuid, MTable table, String trxName)
+	{
+		PO po = ODTPOHelper.generatePO(uuid, table, trxName);
+		if (po.get_ID() > 0)
+			ODTInstallCache.remember(table.getTableName(), uuid, po.get_ID());
+		return po;
 	}
 
 	/**
@@ -137,6 +173,9 @@ public final class ODTInstallEngine
 			throw new AdempiereException("ODTVersion XML element is null");
 
 		LinkedHashSet<Integer> pendingColumnIds = new LinkedHashSet<>();
+		ODTInstallCache.begin();
+		try
+		{
 		NodeList childrenOD = eODTVersion.getElementsByTagName(XML_TAG_ODTObjectData);
 		int objectDataCount = childrenOD.getLength();
 		ODTLog.info(log, ODTLog.MOD_INSTALL, "Start install from version XML | "
@@ -155,7 +194,7 @@ public final class ODTInstallEngine
 					eODTOD.getAttribute(X_KS_ODTObjectData.COLUMNNAME_AD_Table_ID)));
 			ODTLog.fine(log, ODTLog.MOD_INSTALL, "Apply ObjectData from XML | "
 					+ ODTLog.kvs("uuid", objectDataUuid, "table", table.getTableName()));
-			PO po = ODTPOHelper.generatePO(objectDataUuid, table, trxName);
+			PO po = startObject(objectDataUuid, table, trxName);
 
 			NodeList childrenODL = eODTOD.getElementsByTagName(XML_TAG_ODTObjectDataLine);
 			for (int ii = 0; ii < childrenODL.getLength(); ii++)
@@ -179,14 +218,20 @@ public final class ODTInstallEngine
 			AttachmentODTUtil.installProcessAttachmentFromXml(ctx, eODTOD, log);
 		}
 
+		boolean runAccessMaintenance = ODTInstallCache.needsAccessMaintenance();
 		ODTPostInstallService.postInstallPackage(ctx,
 				ODTXmlHelper.extractEntityTypeFromVersionXml(ctx, eODTVersion),
 				pendingColumnIds,
 				ODTXmlHelper.collectTableIndexUuidsFromVersionXml(ctx, eODTVersion),
-				log, trxName);
+				log, trxName, runAccessMaintenance);
 
 		ODTLog.info(log, ODTLog.MOD_INSTALL, "Finished install from version XML | "
 				+ ODTLog.kvs("objectDataCount", objectDataCount, "pendingColumns", pendingColumnIds.size()));
+		}
+		finally
+		{
+			ODTInstallCache.end();
+		}
 	}
 
 	private static PO applyObjectDataLineFromXml(PO po, MTable table, Properties ctx, String trxName,
@@ -237,6 +282,7 @@ public final class ODTInstallEngine
 
 		po = ODTPOHelper.reconcileTrlPOIfExistsByNaturalKey(po, table, ctx, trxName, log);
 
+		boolean inserted = po.is_new();
 		try
 		{
 			po.saveEx();
@@ -247,6 +293,10 @@ public final class ODTInstallEngine
 			throw new AdempiereException("Can't save PO | AD_Table:" + table.getTableName()
 					+ " | ObjectData_UUID:" + objectDataUuid, ex);
 		}
+		if (po.get_ID() > 0)
+			ODTInstallCache.remember(table.getTableName(), objectDataUuid, po.get_ID());
+		if (inserted)
+			ODTInstallCache.noteInserted(table.getTableName());
 
 		if (po instanceof X_AD_Column)
 			ODTDdlService.queueColumnSync((MColumn) po, table, pendingColumnIds);

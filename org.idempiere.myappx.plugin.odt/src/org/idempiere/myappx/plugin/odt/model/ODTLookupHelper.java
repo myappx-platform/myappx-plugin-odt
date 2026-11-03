@@ -127,14 +127,27 @@ public final class ODTLookupHelper
 		}
 	}
 
+	/** Load a referenced row, reusing the refresh cache when a Version Refresh is running. */
+	public static PO loadCachedPO(MTable table, int recordId, String trxName)
+	{
+		ODTExportCache cache = ODTExportCache.current();
+		if (cache != null)
+			return cache.load(table, recordId);
+		return table.getPO(recordId, trxName);
+	}
+
 	/**
 	 * ParentIdCol1#@#ParentIdCol2#@#100000#@#IdCol1#@#IdCol2
 	 */
 	public static String findLookupIdValue(MTable refTable, int record_id, Properties ctx, CLogger log)
 	{
+		ODTExportCache cache = ODTExportCache.current();
+		if (cache != null && cache.hasIdValue(refTable.getAD_Table_ID(), record_id))
+			return cache.idValue(refTable.getAD_Table_ID(), record_id);
+
 		String resultIdValue = null;
 
-		PO refPO = refTable.getPO(record_id, null);
+		PO refPO = loadCachedPO(refTable, record_id, null);
 		String refTableName = refTable.getTableName();
 		POInfo poInfo = POInfo.getPOInfo(ctx, refTable.getAD_Table_ID(), refPO.get_TrxName());
 
@@ -207,6 +220,8 @@ public final class ODTLookupHelper
 			String parentIdValue = findLookupIdValue(parentRefTable, precord_id, ctx, log);
 			resultIdValue = parentIdValue + ODTConstants.ID_VALUE_SEPARATOR + resultIdValue;
 		}
+		if (cache != null)
+			cache.storeIdValue(refTable.getAD_Table_ID(), record_id, resultIdValue);
 		return resultIdValue;
 	}
 
@@ -253,6 +268,13 @@ public final class ODTLookupHelper
 
 	public static MColumn[] getParentColumnsByTable(int AD_Table_ID, Properties ctx, CLogger log)
 	{
+		ODTExportCache cache = ODTExportCache.current();
+		if (cache != null)
+		{
+			MColumn[] cached = cache.parentColumns(AD_Table_ID);
+			if (cached != null)
+				return cached;
+		}
 		String sql = "SELECT * FROM AD_Column WHERE AD_Table_ID=? and isParent = 'Y' order by seqNo, ColumnName";
 		ArrayList<MColumn> list = new ArrayList<>();
 		PreparedStatement pstmt = null;
@@ -274,11 +296,21 @@ public final class ODTLookupHelper
 		{
 			DB.close(rs, pstmt);
 		}
-		return list.toArray(new MColumn[list.size()]);
+		MColumn[] columns = list.toArray(new MColumn[list.size()]);
+		if (cache != null)
+			cache.setParentColumns(AD_Table_ID, columns);
+		return columns;
 	}
 
 	public static MColumn[] getIdentifierColumnsByTable(int AD_Table_ID, Properties ctx, CLogger log)
 	{
+		ODTExportCache cache = ODTExportCache.current();
+		if (cache != null)
+		{
+			MColumn[] cached = cache.identifierColumns(AD_Table_ID);
+			if (cached != null)
+				return cached;
+		}
 		String sql = "SELECT * FROM AD_Column WHERE AD_Table_ID=? and isIdentifier = 'Y' order by seqNo";
 		ArrayList<MColumn> list = new ArrayList<>();
 		PreparedStatement pstmt = null;
@@ -300,6 +332,9 @@ public final class ODTLookupHelper
 		{
 			DB.close(rs, pstmt);
 		}
-		return list.toArray(new MColumn[list.size()]);
+		MColumn[] columns = list.toArray(new MColumn[list.size()]);
+		if (cache != null)
+			cache.setIdentifierColumns(AD_Table_ID, columns);
+		return columns;
 	}
 }

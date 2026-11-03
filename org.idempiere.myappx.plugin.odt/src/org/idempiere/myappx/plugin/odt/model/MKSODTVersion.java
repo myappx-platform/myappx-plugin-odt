@@ -30,6 +30,7 @@ import java.sql.ResultSet;
 import java.sql.Timestamp;
 import java.text.SimpleDateFormat;
 import java.util.List;
+import java.util.Locale;
 import java.util.Properties;
 import java.util.logging.Level;
 
@@ -86,6 +87,8 @@ public class MKSODTVersion extends X_KS_ODTVersion
 	/** Cached seq allocator for {@link #versionRefresh()} (reset per refresh). */
 	private int nextAdObjectSeqNo = -1;
 	private int nextAnySeqNo = -1;
+	/** Open only while {@link #versionRefresh()} or {@link #linkEntityType(String)} is exporting lines. */
+	private ODTObjectDataLineBatch lineBatch;
 
 	private CLogger log = CLogger.getCLogger(MKSODTVersion.class);
 
@@ -128,6 +131,19 @@ public class MKSODTVersion extends X_KS_ODTVersion
 
 	public void linkEntityType(String entityType) 
 	{
+		openExportBatch();
+		try
+		{
+			linkEntityTypeInBatch(entityType);
+		}
+		finally
+		{
+			closeExportBatch();
+		}
+	}
+
+	private void linkEntityTypeInBatch(String entityType)
+	{
 		I_KS_ODTPackage odtPackage = getKS_ODTPackage();
 		ODTLog.info(log, ODTLog.MOD_EXPORT, "Link EntityType | "
 				+ ODTLog.kvs("package", odtPackage.getName(), "entityType", entityType,
@@ -156,6 +172,19 @@ public class MKSODTVersion extends X_KS_ODTVersion
 	}
 
 	public void versionRefresh()
+	{
+		openExportBatch();
+		try
+		{
+			versionRefreshInBatch();
+		}
+		finally
+		{
+			closeExportBatch();
+		}
+	}
+
+	private void versionRefreshInBatch()
 	{
 		String sqlDeleteODL = "DELETE FROM KS_ODTObjectDataLine WHERE KS_ODTObjectData_ID IN ("
 				+ "SELECT KS_ODTObjectData_ID FROM KS_ODTObjectData "
@@ -354,8 +383,45 @@ public class MKSODTVersion extends X_KS_ODTVersion
 		return nextAnySeqNo;
 	}
 
+	private void openExportBatch()
+	{
+		ODTExportCache.begin(get_TrxName());
+		lineBatch = new ODTObjectDataLineBatch(getCtx(), get_TrxName());
+	}
+
+	private void closeExportBatch()
+	{
+		try
+		{
+			if (lineBatch != null)
+				lineBatch.close();
+		}
+		finally
+		{
+			lineBatch = null;
+			ODTExportCache.end();
+		}
+	}
+
+	/** Columns {@link ODTPOBuilder} returns without writing. They are not part of the snapshot. */
+	private static boolean skipExportColumn(String tableName, POInfo poInfo, int index, String columnName)
+	{
+		if ("AD_Chart_ID".equalsIgnoreCase(columnName))
+			return true;
+		boolean trl = tableName != null && tableName.toUpperCase(Locale.ROOT).endsWith("_TRL");
+		if (("AD_Client_ID".equalsIgnoreCase(columnName) && !trl)
+				|| "Created".equalsIgnoreCase(columnName)
+				|| "Updated".equalsIgnoreCase(columnName)
+				|| "UpdatedBy".equalsIgnoreCase(columnName))
+			return true;
+		return poInfo.isKey(index) && !"AD_EntityType".equalsIgnoreCase(columnName) && !trl;
+	}
+
 	private void exportObjectDataLine(PO po, int newodID) {
+		if (lineBatch == null)
+			throw new AdempiereException("Object data line batch is not open");
 		POInfo poInfo = POInfo.getPOInfo(po.getCtx(), po.get_Table_ID(), po.get_TrxName());
+		SimpleDateFormat exportDate = new SimpleDateFormat(ODTConstants.DEFAULT_DATEFORMAT_PATTERN);
 		int size = poInfo.getColumnCount();
 		for (int j = 0; j < size; j++)
 		{
@@ -366,6 +432,8 @@ public class MKSODTVersion extends X_KS_ODTVersion
 			//POInfoColumn infoCol = poInfo.getColumn(j);
 			Object value = po.get_Value(j);
 			String columnName = poInfo.getColumnName(j);
+			if (skipExportColumn(po.get_TableName(), poInfo, j, columnName))
+				continue;
 			Class<?> c = poInfo.getColumnClass(j);
 			int columnDisplayType = poInfo.getColumnDisplayType(j);
 			String refTableName = null;
@@ -452,9 +520,10 @@ public class MKSODTVersion extends X_KS_ODTVersion
 				// no refTableName
 			}
 
-			X_KS_ODTObjectDataLine newodl = new X_KS_ODTObjectDataLine(getCtx(), 0, get_TrxName());
-			newodl.setKS_ODTObjectData_ID(newodID);
-			newodl.setAD_Column_ID(poInfo.getAD_Column_ID(columnName));
+			boolean isNewNull = false;
+			String newValue = null;
+			int newId = 0;
+			String newUuid = null;
 
 			if (refTableName != null)
 			{
@@ -499,12 +568,12 @@ public class MKSODTVersion extends X_KS_ODTVersion
 					} else if ("AD_Menu".equals(refTableName) && record_id == 0) {
 						uuid = null; // Main Menu
 					} else {
-						PO refPO = refTable.getPO(record_id, get_TrxName());
+						PO refPO = ODTLookupHelper.loadCachedPO(refTable, record_id, get_TrxName());
 						uuid = requireObjectUuid(refPO, refTableName);
 					}
 
-					newodl.setNewID(record_id);
-					newodl.setNewUUID(uuid);
+					newId = record_id;
+					newUuid = uuid;
 				}
 				else
 				{
@@ -515,11 +584,11 @@ public class MKSODTVersion extends X_KS_ODTVersion
 			}
 
 			if (value == null || Null.NULL.equals(value))
-				newodl.setIsNewNullValue(true);
+				isNewNull = true;
 			else if (c == Object.class)
-				newodl.setNewValue(value.toString());
+				newValue = value.toString();
 			else if (value instanceof Integer || value instanceof BigDecimal)
-				newodl.setNewValue(value.toString());
+				newValue = value.toString();
 			else if (c == Boolean.class)
 			{
 				boolean bValue = false;
@@ -527,22 +596,21 @@ public class MKSODTVersion extends X_KS_ODTVersion
 					bValue = ((Boolean)value).booleanValue();
 				else
 					bValue = "Y".equals(value);
-				newodl.setNewValue(bValue ? "Y" : "N");
+				newValue = bValue ? "Y" : "N";
 			}
 			else if (value instanceof Timestamp)
 			{
-				Timestamp ts = (Timestamp)value;
-				SimpleDateFormat sdf = new SimpleDateFormat(ODTConstants.DEFAULT_DATEFORMAT_PATTERN);
-				newodl.setNewValue(sdf.format(ts));
+				newValue = exportDate.format((Timestamp) value);
 			}
 			else if (c == String.class)
-				newodl.setNewValue((String)value);
+				newValue = (String) value;
 //				else if (DisplayType.isLOB(dt))
 //					col.appendChild(document.createCDATASection(value.toString()));
 			else
-				newodl.setNewValue(value.toString());
+				newValue = value.toString();
 
-			newodl.saveEx();
+			lineBatch.add(newodID, poInfo.getAD_Column_ID(columnName),
+					isNewNull, false, newValue, null, newId, 0, newUuid, null, null);
 		} // end of all columns
 	}
 
@@ -602,11 +670,19 @@ public class MKSODTVersion extends X_KS_ODTVersion
 		MKSODTVersion odtversion = MKSODTVersion.fromXmlNode(element, odtpackage.get_ID(), odtpackage.getCtx());
 		odtversion.saveEx();
 
-		NodeList children = element.getElementsByTagName("ODTObjectData");
-		for (int i = 0; i < children.getLength(); i++)
+		ODTObjectDataLineBatch batch = new ODTObjectDataLineBatch(odtversion.getCtx(), odtversion.get_TrxName());
+		try
 		{
-			Element elemntOD = (Element)children.item(i);
-			MKSODTObjectData.importFromXmlNode(odtversion, elemntOD);
+			NodeList children = element.getElementsByTagName("ODTObjectData");
+			for (int i = 0; i < children.getLength(); i++)
+			{
+				Element elemntOD = (Element)children.item(i);
+				MKSODTObjectData.importFromXmlNode(odtversion, elemntOD, batch);
+			}
+		}
+		finally
+		{
+			batch.close();
 		}
 	}
  }

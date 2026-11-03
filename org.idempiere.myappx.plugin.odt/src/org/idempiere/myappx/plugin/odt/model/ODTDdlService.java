@@ -11,8 +11,11 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Types;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 import java.util.Properties;
 import java.util.logging.Level;
 
@@ -62,6 +65,8 @@ public final class ODTDdlService
 		Trx trx = openDdlTrx(trxName, log);
 		String effectiveTrxName = trx.getTrxName();
 		LinkedHashSet<Integer> tablesCreated = new LinkedHashSet<>();
+		PhysicalTable physical = null;
+		int loadedTableId = -1;
 
 		for (MColumn column : columns)
 		{
@@ -71,7 +76,12 @@ public final class ODTDdlService
 
 			try
 			{
-				if (syncColumnWithoutFK(ctx, table, column, tablesCreated, trx, log) < 0)
+				if (column.getAD_Table_ID() != loadedTableId)
+				{
+					loadedTableId = column.getAD_Table_ID();
+					physical = loadPhysicalTable(trx, table.getTableName());
+				}
+				if (syncColumnWithoutFK(table, column, tablesCreated, trx, log, physical) < 0)
 					throw new AdempiereException("Column sync failed for " + table.getTableName() + "." + column.getColumnName());
 			}
 			catch (SQLException e)
@@ -188,60 +198,71 @@ public final class ODTDdlService
 			trx.close();
 	}
 
-	static int syncColumnWithoutFK(Properties ctx, MTable table, MColumn column,
-			LinkedHashSet<Integer> tablesCreated, Trx trx, CLogger log) throws SQLException
+	/** One JDBC metadata read per table, shared by every column of that table. */
+	private static PhysicalTable loadPhysicalTable(Trx trx, String tableName) throws SQLException
 	{
-		String trxName = trx.getTrxName();
 		Connection conn = trx.getConnection();
 		DatabaseMetaData md = conn.getMetaData();
 		String catalog = DB.getDatabase().getCatalog();
 		String schema = DB.getDatabase().getSchema();
-		String tableName = table.getTableName();
-		String columnName = column.getColumnName();
+		String lookupName = tableName;
 		if (md.storesUpperCaseIdentifiers())
-		{
-			tableName = tableName.toUpperCase();
-			columnName = columnName.toUpperCase();
-		}
+			lookupName = tableName.toUpperCase(Locale.ROOT);
 		else if (md.storesLowerCaseIdentifiers())
-		{
-			tableName = tableName.toLowerCase();
-			columnName = columnName.toLowerCase();
-		}
+			lookupName = tableName.toLowerCase(Locale.ROOT);
 
-		String sql = null;
-		ResultSet rst = null;
-		ResultSet rsc = null;
+		ResultSet tables = null;
+		ResultSet columns = null;
 		try
 		{
-			rst = md.getTables(catalog, schema, tableName, new String[] { "TABLE" });
-			if (!rst.next())
+			tables = md.getTables(catalog, schema, lookupName, new String[] { "TABLE" });
+			boolean exists = tables.next();
+			DB.close(tables);
+			tables = null;
+			if (!exists)
+				return new PhysicalTable(false, Map.of());
+			Map<String, PhysicalColumn> byName = new HashMap<>();
+			columns = md.getColumns(catalog, schema, lookupName, "%");
+			while (columns.next())
 			{
-				if (!tablesCreated.contains(table.getAD_Table_ID()))
-				{
-					sql = table.getSQLCreate();
-					tablesCreated.add(table.getAD_Table_ID());
-				}
+				String name = columns.getString("COLUMN_NAME");
+				if (name == null)
+					continue;
+				boolean notNull = DatabaseMetaData.columnNoNulls == columns.getInt("NULLABLE");
+				byName.put(name.toLowerCase(Locale.ROOT), new PhysicalColumn(notNull, columns.getInt("DATA_TYPE")));
 			}
-			else if (!tablesCreated.contains(table.getAD_Table_ID()))
-			{
-				rsc = md.getColumns(catalog, schema, tableName, columnName);
-				if (rsc.next())
-				{
-					boolean notNull = DatabaseMetaData.columnNoNulls == rsc.getInt("NULLABLE");
-					sql = column.getSQLModify(table, column.isMandatory() != notNull);
-					sql = adjustOracleLobModifySql(column, rsc, sql);
-				}
-				else
-				{
-					sql = column.getSQLAdd(table);
-				}
-			}
+			return new PhysicalTable(true, byName);
 		}
 		finally
 		{
-			DB.close(rsc);
-			DB.close(rst);
+			DB.close(columns);
+			DB.close(tables);
+		}
+	}
+
+	static int syncColumnWithoutFK(MTable table, MColumn column,
+			LinkedHashSet<Integer> tablesCreated, Trx trx, CLogger log, PhysicalTable physical) throws SQLException
+	{
+		String trxName = trx.getTrxName();
+		String sql = null;
+		if (physical == null || !physical.exists)
+		{
+			if (!tablesCreated.contains(table.getAD_Table_ID()))
+			{
+				sql = table.getSQLCreate();
+				tablesCreated.add(table.getAD_Table_ID());
+			}
+		}
+		else if (!tablesCreated.contains(table.getAD_Table_ID()))
+		{
+			PhysicalColumn existing = physical.column(column.getColumnName());
+			if (existing != null)
+			{
+				sql = column.getSQLModify(table, column.isMandatory() != existing.notNull);
+				sql = adjustOracleLobModifySql(column, existing.dataType, sql);
+			}
+			else
+				sql = column.getSQLAdd(table);
 		}
 
 		if (Util.isEmpty(sql, true))
@@ -254,16 +275,46 @@ public final class ODTDdlService
 				table.getTableName() + "." + column.getColumnName()) ? 1 : -1;
 	}
 
-	static String adjustOracleLobModifySql(MColumn column, ResultSet rsc, String sql) throws SQLException
+	static String adjustOracleLobModifySql(MColumn column, int actualType, String sql)
 	{
 		if (!DB.isOracle() || Util.isEmpty(sql))
 			return sql;
-		int actualType = rsc.getInt("DATA_TYPE");
 		if (actualType == Types.CLOB && sql.contains(" MODIFY " + column.getColumnName() + " CLOB"))
 			return sql.replaceFirst(" MODIFY " + column.getColumnName() + " CLOB", " MODIFY " + column.getColumnName());
 		if (actualType == Types.BLOB && sql.contains(" MODIFY " + column.getColumnName() + " BLOB"))
 			return sql.replaceFirst(" MODIFY " + column.getColumnName() + " BLOB", " MODIFY " + column.getColumnName());
 		return sql;
+	}
+
+	private static final class PhysicalColumn
+	{
+		private final boolean notNull;
+		private final int dataType;
+
+		private PhysicalColumn(boolean notNull, int dataType)
+		{
+			this.notNull = notNull;
+			this.dataType = dataType;
+		}
+	}
+
+	private static final class PhysicalTable
+	{
+		private final boolean exists;
+		private final Map<String, PhysicalColumn> columns;
+
+		private PhysicalTable(boolean exists, Map<String, PhysicalColumn> columns)
+		{
+			this.exists = exists;
+			this.columns = columns;
+		}
+
+		private PhysicalColumn column(String columnName)
+		{
+			if (columnName == null)
+				return null;
+			return columns.get(columnName.toLowerCase(Locale.ROOT));
+		}
 	}
 
 	static boolean executeDdlStatements(String sql, String trxName, Trx trx, CLogger log, String label)

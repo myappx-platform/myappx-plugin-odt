@@ -246,14 +246,23 @@ public final class ODTPOBuilder
 		{
 			if (hasValidUUID)
 			{
-				MTable reftable = MTable.get(ctx, refTableName);
-				String uuidCol = PO.getUUIDColumnName(refTableName);
-				PO refPO = reftable.getPO(uuidCol + "=?", new Object[] { NewUUID }, po.get_TrxName());
-				if (refPO != null)
-					po.set_ValueNoCheck(columnName, refPO.get_ID());
+				Integer cachedId = ODTInstallCache.id(refTableName, NewUUID);
+				if (cachedId != null)
+					po.set_ValueNoCheck(columnName, cachedId);
 				else
-					ODTLog.info(log, ODTLog.MOD_PO, "RefPO not found | "
-							+ ODTLog.kvs("refTable", refTableName, "uuid", NewUUID, "column", columnName));
+				{
+					MTable reftable = MTable.get(ctx, refTableName);
+					String uuidCol = PO.getUUIDColumnName(refTableName);
+					PO refPO = reftable.getPO(uuidCol + "=?", new Object[] { NewUUID }, po.get_TrxName());
+					if (refPO != null)
+					{
+						ODTInstallCache.remember(refTableName, NewUUID, refPO.get_ID());
+						po.set_ValueNoCheck(columnName, refPO.get_ID());
+					}
+					else
+						ODTLog.info(log, ODTLog.MOD_PO, "RefPO not found | "
+								+ ODTLog.kvs("refTable", refTableName, "uuid", NewUUID, "column", columnName));
+				}
 			}
 			else if (isColumnUpdateable)
 				po.set_ValueNoCheck(columnName, null);

@@ -150,14 +150,30 @@ public class MKSODTObjectData extends X_KS_ODTObjectData
 
 	public static void importFromXmlNode(MKSODTVersion odtversion, Element element)
 	{
+		importFromXmlNode(odtversion, element, null);
+	}
+
+	public static void importFromXmlNode(MKSODTVersion odtversion, Element element, ODTObjectDataLineBatch batch)
+	{
 		MKSODTObjectData odtod = MKSODTObjectData.fromXmlNode(element, odtversion.get_ID(), odtversion.getCtx());
 		odtod.saveEx();
 
-		NodeList children = element.getElementsByTagName("ODTObjectDataLine");
-		for (int i = 0; i < children.getLength(); i++)
+		boolean ownBatch = batch == null;
+		if (ownBatch)
+			batch = new ODTObjectDataLineBatch(odtversion.getCtx(), odtversion.get_TrxName());
+		try
 		{
-			Element elemntODL = (Element)children.item(i);
-			MKSODTObjectDataLine.importFromXmlNode(odtod, elemntODL);
+			NodeList children = element.getElementsByTagName("ODTObjectDataLine");
+			for (int i = 0; i < children.getLength(); i++)
+			{
+				Element elemntODL = (Element)children.item(i);
+				MKSODTObjectDataLine.addToBatch(batch, odtod.get_ID(), elemntODL);
+			}
+		}
+		finally
+		{
+			if (ownBatch)
+				batch.close();
 		}
 	}
 }

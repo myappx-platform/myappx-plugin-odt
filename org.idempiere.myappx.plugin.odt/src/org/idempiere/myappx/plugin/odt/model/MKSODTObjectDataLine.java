@@ -141,7 +141,40 @@ public class MKSODTObjectDataLine extends X_KS_ODTObjectDataLine {
 
 
 	public static void importFromXmlNode(MKSODTObjectData odtod, Element element) {
-		MKSODTObjectDataLine odtodl = MKSODTObjectDataLine.fromXmlNode(element, odtod.get_ID(), odtod.getCtx());
-		odtodl.saveEx();
+		ODTObjectDataLineBatch batch = new ODTObjectDataLineBatch(odtod.getCtx(), odtod.get_TrxName());
+		try
+		{
+			addToBatch(batch, odtod.get_ID(), element);
+		}
+		finally
+		{
+			batch.close();
+		}
+	}
+
+	/** Insert one XML line through {@code batch} instead of {@code PO.saveEx}. */
+	public static void addToBatch(ODTObjectDataLineBatch batch, int objectDataId, Element element)
+	{
+		String lineUuid = element.getAttribute("UUID");
+		int columnId = Integer.valueOf(element.getAttribute(COLUMNNAME_AD_Column_ID));
+		Node NewValue = element.getElementsByTagName(COLUMNNAME_NewValue).item(0);
+		Node OldValue = element.getElementsByTagName(COLUMNNAME_OldValue).item(0);
+		Node IsNewNullValue = element.getElementsByTagName(COLUMNNAME_IsNewNullValue).item(0);
+		Node IsOldNullValue = element.getElementsByTagName(COLUMNNAME_IsOldNullValue).item(0);
+		Node NewID = element.getElementsByTagName(COLUMNNAME_NewID).item(0);
+		Node OldID = element.getElementsByTagName(COLUMNNAME_OldID).item(0);
+		Node NewUUID = element.getElementsByTagName(COLUMNNAME_NewUUID).item(0);
+		Node OldUUID = element.getElementsByTagName(COLUMNNAME_OldUUID).item(0);
+
+		batch.add(objectDataId, columnId,
+				Boolean.valueOf(IsNewNullValue.getTextContent()),
+				Boolean.valueOf(IsOldNullValue.getTextContent()),
+				NewValue.getTextContent(),
+				OldValue.getTextContent(),
+				Integer.valueOf(NewID.getTextContent()),
+				Integer.valueOf(OldID.getTextContent()),
+				NewUUID.getTextContent(),
+				OldUUID.getTextContent(),
+				lineUuid);
 	}
 }

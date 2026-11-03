@@ -47,16 +47,33 @@ public final class ODTPostInstallService
 	public static void postInstallPackage(Properties ctx, String entityType, LinkedHashSet<Integer> columnIds,
 			List<String> tableIndexUuids, CLogger log, String trxName)
 	{
+		postInstallPackage(ctx, entityType, columnIds, tableIndexUuids, log, trxName, true);
+	}
+
+	/**
+	 * @param runAccessMaintenance when false, skip the full-database Sequence Check and Role Access Update.
+	 *        Install does that only after creating a table, window, process, form, workflow, or info window.
+	 */
+	public static void postInstallPackage(Properties ctx, String entityType, LinkedHashSet<Integer> columnIds,
+			List<String> tableIndexUuids, CLogger log, String trxName, boolean runAccessMaintenance)
+	{
 		int columnCount = columnIds != null ? columnIds.size() : 0;
 		int indexCount = tableIndexUuids != null ? tableIndexUuids.size() : 0;
 		ODTLog.info(log, ODTLog.MOD_POST_INSTALL, "Start post-install | "
-				+ ODTLog.kvs("entityType", entityType, "columnCount", columnCount, "indexCount", indexCount));
+				+ ODTLog.kvs("entityType", entityType, "columnCount", columnCount, "indexCount", indexCount,
+						"runAccessMaintenance", runAccessMaintenance));
 
 		ODTDdlService.synchronizeColumns(ctx, columnIds, log, trxName);
 		ODTIndexService.validateTableIndexes(ctx, entityType, tableIndexUuids, log, trxName);
 		ODTDdlService.deferForeignKeys(ctx, columnIds, log, trxName);
-		doSequencCheck(ctx);
-		doRoleAccessUpdate(ctx);
+		if (runAccessMaintenance)
+		{
+			doSequencCheck(ctx);
+			doRoleAccessUpdate(ctx);
+		}
+		else
+			ODTLog.info(log, ODTLog.MOD_POST_INSTALL, "Skip sequence check and role access | "
+					+ "no new table, window, process, form, workflow, or info window");
 
 		ODTLog.info(log, ODTLog.MOD_POST_INSTALL, "Finished post-install | "
 				+ ODTLog.kvs("entityType", entityType));
