@@ -235,9 +235,15 @@ public class ODT2PackActivator extends Incremental2PackActivator {
 		}
 		
 		packIn(installedVersions);
-		// Kept where it always was. A subclass uses this to register its services (AI Copilot does),
-		// so moving it into installPackage's phase 3 would leave the service unregistered whenever
-		// pack-in threw - a much worse failure than the duplicate call it would fix.
+		// Deliberately left where it has always been. A subclass uses this hook to register its
+		// services (AI Copilot does), so moving it into installPackage's phase 3 would leave the
+		// service unregistered whenever pack-in threw - a much worse failure than the duplication
+		// it would fix.
+		//
+		// Known semantic gap, unchanged here: packInAll() runs packInODT, then packIn2Pack, then
+		// packInFolder, and only packIn2Pack calls this hook. A bundle whose packages arrive via
+		// ODTPackage*.xml or the ODT2Pack folder therefore never triggers afterPackIn. That is a
+		// base-class design issue; fixing it here would change when subclasses see the hook.
 		afterPackIn();
 	}
 
@@ -596,90 +602,40 @@ public class ODT2PackActivator extends Incremental2PackActivator {
 		Env.setContext(Env.getCtx(), Env.AD_ROLE_ID, SystemIDs.ROLE_SYSTEM);
 	};
 
-	/**
-	 * Prefix for the per-JVM pack-in marker.
-	 * <p>
-	 * The marker lives in system properties because they outlive this classloader. A refresh loads
-	 * a fresh copy of this class, so a static field would reset and let pack-in run again inside
-	 * the same live server. A real restart starts a new JVM, so the marker disappears and pack-in
-	 * runs - which is exactly the intended upgrade moment.
-	 * <p>
-	 * Deliberately keyed on the symbolic name only, never the version. A hot update replaces the
-	 * bundle with a new version inside the running server; keying on the version made that look
-	 * like a fresh deployment, so pack-in took the DB lock and re-scanned every package again.
-	 * The ODT version gate caught the duplicate rows, but the lock and the rescan are exactly what
-	 * must not happen while users are working.
-	 */
-	private static final String PACK_IN_MARKER_PREFIX = "myappx.odt.packInDone.";
-
-	/**
-	 * Guards the check-then-run of {@link #claimPackIn()} across the two trigger paths.
-	 */
-	private static final Object PACK_IN_LOCK = new Object();
-
 	@Override
 	protected void frameworkStarted() {
-		// The base class reaches this from two places - the STARTLEVEL_CHANGED framework event and
-		// addingService - so it runs more than once. Readiness must be tested before the marker is
-		// taken: claiming it first would spend the one slot on a call that cannot proceed and drop
-		// pack-in for the whole JVM.
-		if (service == null)
-			return;
-		if (!claimPackIn()) {
-			logger.info("Pack-in already ran in this JVM; skipping for " + getName());
-			return;
-		}
-		Runnable packIn = new Runnable() {
-			@Override
-			public void run() {
-				ClassLoader cl = Thread.currentThread().getContextClassLoader();
-				try {
-					Thread.currentThread().setContextClassLoader(ODT2PackActivator.class.getClassLoader());
-					setupPackInContext();
-					installPackage();
-				} finally {
-					ServerContext.dispose();
-					service = null;
-					Thread.currentThread().setContextClassLoader(cl);
-				}
-			}
-		};
-		if (Adempiere.isStarted()) {
-			Adempiere.getThreadPoolExecutor().execute(packIn);
-		} else {
-			Adempiere.addServerStateChangeListener(new ServerStateChangeListener() {
+		// The base class reaches this from two places: the STARTLEVEL_CHANGED framework event and
+		// addingService. Only one may run pack-in. The service check below does that on its own -
+		// the first call consumes the dictionary service and clears the field, so a second call
+		// returns here. An earlier version added a system-property marker on top of this; it never
+		// fired, because the service field already prevented the repeat.
+		if (service != null) {
+			Runnable packIn = new Runnable() {
 				@Override
-				public void stateChange(ServerStateChangeEvent event) {
-					if (event.getEventType() == ServerStateChangeEvent.SERVER_START && service != null)
-						packIn.run();
+				public void run() {
+					ClassLoader cl = Thread.currentThread().getContextClassLoader();
+					try {
+						Thread.currentThread().setContextClassLoader(ODT2PackActivator.class.getClassLoader());
+						setupPackInContext();
+						installPackage();
+					} finally {
+						ServerContext.dispose();
+						service = null;
+						Thread.currentThread().setContextClassLoader(cl);
+					}
 				}
-			});
-		}
-	}
-
-	/**
-	 * Take the one pack-in slot for this JVM.
-	 * <p>
-	 * Keyed by bundle symbolic name only. Version is deliberately excluded: a hot update swaps in
-	 * a new revision inside the running JVM, and treating that as a new deployment made pack-in
-	 * take the DB lock and rescan packages while the server was in use.
-	 * {@link #getName()} is not used either: during pack-in it reports the current package file,
-	 * which changes every call.
-	 * @return true for the first caller in this JVM, false afterwards
-	 */
-	private boolean claimPackIn() {
-		String symbolicName;
-		try {
-			symbolicName = context == null ? "unknown" : String.valueOf(context.getBundle().getSymbolicName());
-		} catch (Exception e) {
-			symbolicName = "unknown";
-		}
-		String key = PACK_IN_MARKER_PREFIX + symbolicName;
-		synchronized (PACK_IN_LOCK) {
-			if (System.getProperty(key) != null)
-				return false;
-			System.setProperty(key, Long.toString(System.currentTimeMillis()));
-			return true;
+			};
+			if (Adempiere.isStarted()) {
+				Adempiere.getThreadPoolExecutor().execute(packIn);
+			} else {
+				Adempiere.addServerStateChangeListener(new ServerStateChangeListener() {
+					@Override
+					public void stateChange(ServerStateChangeEvent event) {
+						if (event.getEventType() == ServerStateChangeEvent.SERVER_START && service != null)
+							packIn.run();
+					}
+				});
+			}
 		}
 	}
 }
