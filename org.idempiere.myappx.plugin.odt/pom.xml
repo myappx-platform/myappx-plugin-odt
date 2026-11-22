@@ -9,6 +9,7 @@
 	</parent>
 
 	<artifactId>org.idempiere.myappx.plugin.odt</artifactId>
+	<version>14.0.1-SNAPSHOT</version>
 	<name>MyAppx Plugin : ODT</name>
 	<packaging>eclipse-plugin</packaging>
 </project>

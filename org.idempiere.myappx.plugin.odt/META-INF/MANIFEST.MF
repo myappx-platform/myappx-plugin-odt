@@ -2,7 +2,7 @@ Manifest-Version: 1.0
 Bundle-ManifestVersion: 2
 Bundle-Name: MyAppx Plugin : ObjectData Tool
 Bundle-SymbolicName: org.idempiere.myappx.plugin.odt;singleton:=true
-Bundle-Version: 14.0.0.qualifier
+Bundle-Version: 14.0.1.qualifier
 Bundle-Activator: org.idempiere.myappx.plugin.odt.Activator
 Bundle-Vendor: Ken Longnan <ken.longnan@gmail.com>
 Bundle-RequiredExecutionEnvironment: JavaSE-17
